@@ -1,7 +1,9 @@
 """
 data.ai (App Annie) API client for fetching app store statistics.
 
-Requires a data.ai Intelligence subscription and API key set as DATA_AI_API_KEY.
+When DATA_AI_API_KEY is not set, automatically falls back to realistic
+estimated demo data (see mock_data.py).
+
 API docs: https://docs.data.ai/docs/intelligence-api
 """
 
@@ -9,25 +11,33 @@ import requests
 import pandas as pd
 from datetime import date
 from config import FINTECH_APPS, METRIC_MAP
+import mock_data
 
 
 BASE_URL = "https://api.data.ai/v1.3/intelligence"
 
+DEMO_MODE = "demo"
+LIVE_MODE = "live"
+
 
 class DataAIClient:
     def __init__(self, api_key: str):
-        if not api_key:
-            raise ValueError(
-                "DATA_AI_API_KEY is not set. Add it to your .env file.\n"
-                "See .env.example for the required format."
+        if api_key:
+            self.mode = LIVE_MODE
+            self.session = requests.Session()
+            self.session.headers.update(
+                {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
             )
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-        )
+        else:
+            self.mode = DEMO_MODE
+            self.session = None
+
+    @property
+    def is_demo(self) -> bool:
+        return self.mode == DEMO_MODE
 
     def get_app_history(
         self,
@@ -39,25 +49,22 @@ class DataAIClient:
         """
         Fetch monthly metric history for a single app.
 
-        Args:
-            app_name:   Key from FINTECH_APPS (e.g. "Cash App")
-            metric:     One of "Downloads", "DAU", "MAU"
-            start_date: Start of period (inclusive)
-            end_date:   End of period (inclusive)
+        Falls back to estimated demo data when no API key is configured.
 
         Returns:
             DataFrame with columns: date (datetime), app_name (str), value (float)
         """
+        if self.is_demo:
+            return mock_data.generate(app_name, metric, start_date, end_date)
+
         if app_name not in FINTECH_APPS:
             raise ValueError(f"Unknown app: {app_name}. Check config.py FINTECH_APPS.")
-
         if metric not in METRIC_MAP:
             raise ValueError(f"Unknown metric: {metric}. Use one of {list(METRIC_MAP.keys())}")
 
         app_cfg = FINTECH_APPS[app_name]
         app_id = app_cfg["ios_app_id"]
         platform = app_cfg["platform"]
-
         device = "iphone" if platform == "ios" else "android_phone"
 
         url = f"{BASE_URL}/apps/{app_id}/app_history/"
@@ -113,6 +120,9 @@ class DataAIClient:
 
         Returns a single DataFrame with columns: date, app_name, value
         """
+        if self.is_demo:
+            return mock_data.generate_multi(app_names, metric, start_date, end_date)
+
         frames = []
         errors = []
 
@@ -124,7 +134,6 @@ class DataAIClient:
                 errors.append(f"{name}: {e}")
 
         if errors:
-            # Surface errors but still return whatever succeeded
             raise RuntimeError(
                 "Some apps failed to load:\n" + "\n".join(errors)
             )

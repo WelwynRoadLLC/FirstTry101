@@ -139,14 +139,15 @@ st.markdown(
     f"**{metric}** · {period_label} · US · iOS"
 )
 
-if not DATA_AI_API_KEY:
-    st.error(
-        "**API key not configured.**\n\n"
-        "Create a `.env` file in the project root with:\n"
-        "```\nDATA_AI_API_KEY=your_data_ai_key_here\n```\n"
-        "You need a [data.ai Intelligence](https://www.data.ai) subscription to use this app."
+client = DataAIClient(DATA_AI_API_KEY)
+
+if client.is_demo:
+    st.info(
+        "**Demo mode** — no `DATA_AI_API_KEY` found. "
+        "Showing estimated figures based on public reports (not official data). "
+        "Add your key to `.env` to switch to live data.ai data.",
+        icon="ℹ️",
     )
-    st.stop()
 
 if not selected_apps:
     st.info("Select at least one app in the sidebar to get started.")
@@ -154,16 +155,17 @@ if not selected_apps:
 
 # Auto-fetch on load, or re-fetch on button click
 if fetch_btn or "last_fig" not in st.session_state:
-    with st.spinner("Fetching data from data.ai…"):
+    label = "Loading estimated data…" if client.is_demo else "Fetching data from data.ai…"
+    with st.spinner(label):
         try:
-            client = DataAIClient(DATA_AI_API_KEY)
             df = client.get_multi_app(selected_apps, metric, start_date, end_date)
 
             if df.empty:
                 st.warning("No data returned for the selected apps and time range.")
                 st.stop()
 
-            fig = build_chart(df, metric, period_label)
+            chart_metric = f"{metric} (Estimated)" if client.is_demo else metric
+            fig = build_chart(df, chart_metric, period_label)
             st.session_state["last_fig"] = fig
             st.session_state["last_df"] = df
 
