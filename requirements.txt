@@ -8,3 +8,8 @@ python-dateutil>=2.8
 feedparser>=6.0
 trafilatura>=1.9
 anthropic>=0.40
+# Market data
+yfinance>=0.2
+# PDF newsletter export
+weasyprint>=62.0
+markdown>=3.5

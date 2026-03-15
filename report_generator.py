@@ -2,11 +2,11 @@
 Report Generator
 
 Uses the Claude API (claude-opus-4-6) with adaptive thinking to synthesize
-a polished morning research report from crawled news articles.
+a hedge-fund-style morning intelligence brief from crawled news and market data.
 """
 
 from datetime import date
-from typing import Generator
+from typing import Generator, Optional
 
 import anthropic
 
@@ -16,83 +16,106 @@ MODEL = "claude-opus-4-6"
 MAX_TOKENS = 8192
 
 _SYSTEM_PROMPT = """\
-You are an elite research analyst producing a daily morning briefing.
-Your reports are concise, insightful, and structured.
-Write in a professional yet readable tone — no filler, no fluff.
-Use Markdown for formatting."""
+You are a senior research analyst at a multi-strategy hedge fund.
+You write the firm's daily morning intelligence brief — the document the PMs
+read before markets open. It must be:
+- Actionable: every section ties back to positioning or risk
+- Specific: name tickers, sectors, spreads, and catalysts explicitly
+- Concise: no filler, no passive voice, no restating the obvious
+- Opinionated: surface the 2-3 ideas that genuinely matter today
+
+Use Markdown for formatting. Use $TICKER notation for all equity references."""
 
 _REPORT_TEMPLATE = """\
-Today is {date}. You have been given {n_items} items (news articles and/or social media posts) \
-across {n_topics} topic areas.
+Today is {date}. Markets {market_status}.
 
-Topics of interest: {topics}
+TOPICS OF FOCUS: {topics}
 
----
+──────────────────────────────────────────────────────────────
+PRE-MARKET DATA (fetched live)
+──────────────────────────────────────────────────────────────
+{market_table}
 
-CONTENT:
+──────────────────────────────────────────────────────────────
+NEWS & SOCIAL CONTENT ({n_items} items from {n_sources} sources)
+──────────────────────────────────────────────────────────────
 {articles_block}
 
----
+──────────────────────────────────────────────────────────────
 
-Write a **Daily Morning Research Report** with the following structure:
-
-# Morning Research Report — {date}
-
-## Executive Summary
-A 3-5 sentence overview of the most important developments today.
-
-## Key Stories
-For each major story (pick the 5-8 most significant), write:
-- **Headline** (source, category)
-- 2-4 sentence summary with key facts
-- 1 sentence on why this matters
-
-## Themes & Trends
-Identify 2-4 cross-cutting themes connecting multiple stories and posts.
-Bullet points with brief explanations.
-
-## Market & Economic Signals
-(Include only if finance/business articles are present)
-Brief bullet list of relevant market-moving news.
-
-## Social Media Pulse
-(Include only if social media posts are present — X.com and/or Truth Social)
-- 3-5 notable posts or emerging narratives from social media
-- Flag any posts that contradict or amplify mainstream news coverage
-- Note influential accounts or viral topics if visible
-
-## What to Watch
-2-3 forward-looking items: upcoming events, decisions, or developments to monitor.
+Write the morning brief using EXACTLY this structure. Do not add or remove sections.
 
 ---
-*Report generated from {n_items} items. Sources: {sources_list}*
+
+# Morning Intelligence Brief — {date}
+
+## Market Snapshot
+Interpret the pre-market data above. Summarize the overall tone (risk-on/off,
+direction of futures, yield moves, VIX). 2-4 sentences max.
+
+## Key Themes
+### 1. [Theme Title]
+- **What's happening:** 2-3 sentences
+- **Tickers in play:** $XXX, $YYY
+- **Implication:** One clear sentence on long/short/avoid/watch positioning
+
+### 2. [Theme Title]
+*(repeat structure — include 3-5 themes total)*
+
+## Catalyst Calendar
+Bullet list of known events **today** and **this week** visible in the news
+(earnings, FOMC, macro data releases, regulatory decisions). Include estimated
+times where mentioned. Flag surprises vs. consensus.
+
+## Sector Intelligence
+One crisp bullet per relevant sector (only sectors with actual news):
+- **Financials:** …
+- **Technology / AI:** …
+- *(add others as needed)*
+
+## Social Signals
+*(Include only if social media posts are present — skip section entirely if not)*
+- 3-5 notable narratives circulating on X.com or Truth Social
+- Flag any posts amplifying or contradicting mainstream coverage
+- Note if any high-profile accounts are driving a specific narrative
+
+## Risk Flags
+2-4 tail risks or uncertainty items worth monitoring. Format:
+- ⚠️ **[Risk label]:** Brief explanation of the risk and trigger conditions
+
+## Tactical Watchlist
+Table of specific names the PM should have on their screen today:
+
+| Ticker | Thesis | Catalyst | Bias |
+|--------|--------|----------|------|
+| $XXX | … | … | Long/Short/Neutral |
+
+*(Include 5-8 names drawn from the news and market data above)*
+
+---
+*Brief compiled from {n_items} sources including {sources_list}.*
+*Pre-market data as of report generation time.*
 """
 
 
-def _build_articles_block(articles: list[Article], max_chars_per_article: int = 800) -> str:
-    """Format articles and social posts into a compact block for the prompt."""
+def _build_articles_block(articles: list[Article], max_chars: int = 700) -> str:
     lines = []
     for i, a in enumerate(articles, 1):
-        pub = a.published.strftime("%Y-%m-%d %H:%M UTC") if a.published else "unknown date"
+        pub = a.published.strftime("%Y-%m-%d %H:%M UTC") if a.published else "unknown"
 
         if a.item_type == "post":
-            # Social media post — summary already contains the full text + engagement
-            text = a.summary
-            author_line = f" | Author: {a.author}" if a.author else ""
+            author_str = f" | {a.author}" if a.author else ""
             lines.append(
-                f"[{i}] [SOCIAL POST] {a.source}{author_line}\n"
-                f"    Category: {a.category} | Published: {pub}\n"
-                f"    URL: {a.url}\n"
-                f"    {text}\n"
+                f"[{i}] [SOCIAL — {a.source}]{author_str} | {pub}\n"
+                f"    {a.summary}\n"
             )
         else:
-            # News article
             text = a.full_text or a.summary
-            if len(text) > max_chars_per_article:
-                text = text[:max_chars_per_article] + "…"
+            if len(text) > max_chars:
+                text = text[:max_chars] + "…"
             lines.append(
-                f"[{i}] **{a.title}**\n"
-                f"    Source: {a.source} | Category: {a.category} | Published: {pub}\n"
+                f"[{i}] {a.title}\n"
+                f"    Source: {a.source} | {a.category} | {pub}\n"
                 f"    URL: {a.url}\n"
                 f"    {text}\n"
             )
@@ -102,17 +125,19 @@ def _build_articles_block(articles: list[Article], max_chars_per_article: int = 
 def generate_report(
     articles: list[Article],
     topics: list[str],
-    report_date: date | None = None,
-    api_key: str | None = None,
+    market_table: str = "",
+    report_date: Optional[date] = None,
+    api_key: Optional[str] = None,
 ) -> Generator[str, None, None]:
     """
-    Stream a markdown morning research report using Claude.
+    Stream a hedge-fund morning brief using Claude.
 
     Args:
-        articles: List of crawled articles.
-        topics: User-specified topic filters.
-        report_date: Date for the report header (defaults to today).
-        api_key: Anthropic API key (falls back to ANTHROPIC_API_KEY env var).
+        articles: Crawled articles and social posts.
+        topics: Topic filters in use.
+        market_table: Pre-formatted markdown table of market data.
+        report_date: Report date (defaults to today).
+        api_key: Anthropic API key (falls back to env var).
 
     Yields:
         Text chunks from the streaming Claude response.
@@ -120,26 +145,35 @@ def generate_report(
     client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
 
     if not articles:
-        yield "# Morning Research Report\n\n*No articles found matching the selected criteria.*"
+        yield "# Morning Intelligence Brief\n\n*No content found matching the selected criteria.*"
         return
 
     if report_date is None:
         report_date = date.today()
 
     date_str = report_date.strftime("%B %d, %Y")
-    topics_str = ", ".join(topics) if topics else "General news"
+    topics_str = ", ".join(topics) if topics else "Financial services, AI, macro"
     sources = sorted({a.source for a in articles})
-    sources_list = ", ".join(sources)
 
-    articles_block = _build_articles_block(articles)
+    # Determine market status string
+    from datetime import datetime, timezone
+    now_hour = datetime.now(timezone.utc).hour
+    if 9 <= now_hour < 14:   # 9-14 UTC = pre-market / early US
+        market_status = "open in pre-market / early session"
+    elif 14 <= now_hour < 21:
+        market_status = "are in regular session"
+    else:
+        market_status = "are closed (after-hours)"
 
     prompt = _REPORT_TEMPLATE.format(
         date=date_str,
-        n_items=len(articles),
-        n_topics=len(set(a.category for a in articles)),
+        market_status=market_status,
         topics=topics_str,
-        articles_block=articles_block,
-        sources_list=sources_list,
+        market_table=market_table or "*Market data not available.*",
+        n_items=len(articles),
+        n_sources=len(sources),
+        articles_block=_build_articles_block(articles),
+        sources_list=", ".join(sources[:8]) + ("…" if len(sources) > 8 else ""),
     )
 
     with client.messages.stream(
@@ -150,7 +184,6 @@ def generate_report(
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
         for event in stream:
-            # Only yield text deltas (skip thinking blocks)
             if (
                 event.type == "content_block_delta"
                 and hasattr(event, "delta")
@@ -162,8 +195,9 @@ def generate_report(
 def generate_report_full(
     articles: list[Article],
     topics: list[str],
-    report_date: date | None = None,
-    api_key: str | None = None,
+    market_table: str = "",
+    report_date: Optional[date] = None,
+    api_key: Optional[str] = None,
 ) -> str:
     """Non-streaming version — returns the complete report string."""
-    return "".join(generate_report(articles, topics, report_date, api_key))
+    return "".join(generate_report(articles, topics, market_table, report_date, api_key))
