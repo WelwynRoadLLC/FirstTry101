@@ -2,8 +2,8 @@
 Daily Morning Research Report
 
 AI-powered news crawler and report generator.
-Fetches articles from RSS feeds, filters by topics, and uses Claude to
-synthesize a polished morning briefing.
+Sources: RSS feeds (Bloomberg, FT, Reuters, CNBC, etc.),
+         X.com (Twitter API v2), and Truth Social.
 
 Run with:
     streamlit run news_report.py
@@ -19,6 +19,8 @@ from news_crawler import (
     ALL_CATEGORIES,
     NEWS_SOURCES,
     fetch_articles,
+    fetch_x_posts,
+    fetch_truth_social_posts,
     filter_by_topics,
     enrich_with_full_text,
 )
@@ -77,6 +79,15 @@ st.markdown(
         font-family: "Georgia", serif;
         line-height: 1.7;
     }
+    .source-tag {
+        display: inline-block;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 3px;
+        padding: 1px 6px;
+        font-size: 0.8em;
+        margin: 1px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -87,12 +98,12 @@ with st.sidebar:
     st.markdown("## 📰 Report Settings")
     st.markdown("---")
 
-    # API key
+    # Anthropic API key
     st.markdown("**Anthropic API Key**")
-    env_key = os.getenv("ANTHROPIC_API_KEY", "")
+    env_anthropic = os.getenv("ANTHROPIC_API_KEY", "")
     api_key_input = st.text_input(
-        "API Key",
-        value=env_key,
+        "Anthropic API Key",
+        value=env_anthropic,
         type="password",
         placeholder="sk-ant-...",
         label_visibility="collapsed",
@@ -102,19 +113,73 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Categories
-    st.markdown("**News Categories**")
-    selected_categories = []
+    # ── RSS News Categories ───────────────────────────────────────────────────
+    st.markdown("**News Categories** *(RSS)*")
+    selected_categories: list[str] = []
     default_cats = {"General", "Business & Finance", "Technology"}
     for cat in ALL_CATEGORIES:
-        if st.checkbox(cat, value=(cat in default_cats)):
+        if st.checkbox(cat, value=(cat in default_cats), key=f"cat_{cat}"):
             selected_categories.append(cat)
 
     st.markdown("---")
 
-    # Topics / keywords
+    # ── X.com ─────────────────────────────────────────────────────────────────
+    st.markdown("**X.com (Twitter)**")
+    use_x = st.checkbox("Include X.com posts", value=False, key="use_x")
+    if use_x:
+        env_x = os.getenv("X_BEARER_TOKEN", "")
+        x_bearer = st.text_input(
+            "X Bearer Token",
+            value=env_x,
+            type="password",
+            placeholder="AAAA...",
+            label_visibility="collapsed",
+        )
+        st.caption("Twitter API v2 Bearer Token from developer.twitter.com")
+        x_queries_raw = st.text_area(
+            "X search queries",
+            placeholder="e.g. Fed interest rates\nAI earnings\ntech layoffs",
+            height=90,
+            help="One search query per line. Each is fetched separately.",
+            label_visibility="collapsed",
+        )
+        x_queries = [q.strip() for q in x_queries_raw.splitlines() if q.strip()]
+        x_max = st.slider("Posts per query (X)", min_value=5, max_value=10, value=10)
+    else:
+        x_bearer = ""
+        x_queries = []
+        x_max = 10
+
+    st.markdown("---")
+
+    # ── Truth Social ──────────────────────────────────────────────────────────
+    st.markdown("**Truth Social**")
+    use_truth = st.checkbox("Include Truth Social posts", value=False, key="use_truth")
+    if use_truth:
+        truth_queries_raw = st.text_area(
+            "Truth Social search terms",
+            placeholder="e.g. economy\nelection\ntariffs",
+            height=90,
+            help="One search term per line. No API key required.",
+            label_visibility="collapsed",
+        )
+        truth_queries = [q.strip() for q in truth_queries_raw.splitlines() if q.strip()]
+        truth_timeline = st.checkbox(
+            "Also include public timeline",
+            value=False,
+            help="Pulls latest posts from the Truth Social public feed (no search filter).",
+        )
+        truth_max = st.slider("Posts per query (Truth Social)", min_value=5, max_value=20, value=10)
+    else:
+        truth_queries = []
+        truth_timeline = False
+        truth_max = 10
+
+    st.markdown("---")
+
+    # ── Topic Filter ──────────────────────────────────────────────────────────
     st.markdown("**Topic Filters** *(optional)*")
-    st.caption("Comma-separated keywords to focus the report. Leave blank for all news.")
+    st.caption("Comma-separated keywords applied across ALL sources. Leave blank for all content.")
     topics_input = st.text_area(
         "Topics",
         placeholder="e.g. AI, interest rates, climate, earnings",
@@ -125,9 +190,9 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Crawl options
+    # ── Crawl Options ─────────────────────────────────────────────────────────
     st.markdown("**Crawl Options**")
-    max_per_feed = st.slider("Articles per feed", min_value=5, max_value=25, value=10)
+    max_per_feed = st.slider("Articles per RSS feed", min_value=5, max_value=25, value=10)
     fetch_full = st.checkbox(
         "Fetch full article text",
         value=False,
@@ -136,11 +201,12 @@ with st.sidebar:
 
     st.markdown("---")
 
+    has_any_source = bool(selected_categories or (use_x and x_bearer and x_queries) or use_truth)
     generate_btn = st.button(
         "Generate Morning Report",
         use_container_width=True,
         type="primary",
-        disabled=not api_key_input,
+        disabled=not api_key_input or not has_any_source,
     )
 
 # ── Main Area ─────────────────────────────────────────────────────────────────
@@ -151,55 +217,93 @@ st.markdown(f"*{today.strftime('%A, %B %d, %Y')}*")
 st.markdown("---")
 
 if generate_btn:
-    if not selected_categories:
-        st.error("Select at least one news category in the sidebar.")
-        st.stop()
+    all_items: list = []
 
-    # Step 1: Crawl
-    with st.status("Crawling news feeds…", expanded=True) as status:
-        st.write(f"Fetching from {sum(len(NEWS_SOURCES[c]) for c in selected_categories)} feeds…")
-        articles = fetch_articles(selected_categories, max_per_feed=max_per_feed)
-        st.write(f"Found **{len(articles)}** articles.")
+    with st.status("Gathering content…", expanded=True) as status:
 
-        if topics:
-            articles = filter_by_topics(articles, topics)
-            st.write(f"After topic filtering: **{len(articles)}** articles match your keywords.")
+        # RSS
+        if selected_categories:
+            n_feeds = sum(len(NEWS_SOURCES[c]) for c in selected_categories)
+            st.write(f"Fetching from **{n_feeds}** RSS feeds…")
+            rss_articles = fetch_articles(selected_categories, max_per_feed=max_per_feed)
+            st.write(f"RSS: **{len(rss_articles)}** articles found.")
+            all_items.extend(rss_articles)
 
-        if not articles:
-            status.update(label="No articles found.", state="error")
-            st.error(
-                "No articles matched your filters. "
-                "Try broader topics or more categories."
+        # X.com
+        if use_x and x_bearer and x_queries:
+            st.write(f"Searching X.com for **{len(x_queries)}** queries…")
+            try:
+                x_posts = fetch_x_posts(x_bearer, x_queries, max_per_query=x_max)
+                st.write(f"X.com: **{len(x_posts)}** posts found.")
+                all_items.extend(x_posts)
+            except ValueError as e:
+                st.warning(f"X.com skipped: {e}")
+        elif use_x and not x_bearer:
+            st.warning("X.com skipped — no Bearer Token provided.")
+        elif use_x and not x_queries:
+            st.warning("X.com skipped — no search queries entered.")
+
+        # Truth Social
+        if use_truth:
+            q_label = f"**{len(truth_queries)}** queries" if truth_queries else "public timeline only"
+            st.write(f"Fetching Truth Social posts ({q_label})…")
+            try:
+                ts_posts = fetch_truth_social_posts(
+                    queries=truth_queries,
+                    max_per_query=truth_max,
+                    include_public_timeline=truth_timeline,
+                )
+                st.write(f"Truth Social: **{len(ts_posts)}** posts found.")
+                all_items.extend(ts_posts)
+            except Exception as e:
+                st.warning(f"Truth Social skipped: {e}")
+
+        # Topic filtering
+        if topics and all_items:
+            before = len(all_items)
+            all_items = filter_by_topics(all_items, topics)
+            st.write(
+                f"Topic filter applied — **{len(all_items)}** of {before} items match: "
+                + ", ".join(f"`{t}`" for t in topics)
             )
+
+        if not all_items:
+            status.update(label="No content found.", state="error")
+            st.error("No items matched your filters. Try broader topics or add more sources.")
             st.stop()
 
+        # Full text enrichment (articles only)
         if fetch_full:
-            st.write(f"Fetching full text for up to 15 articles…")
-            articles = enrich_with_full_text(articles, max_articles=15)
+            n_articles = sum(1 for a in all_items if a.item_type == "article")
+            st.write(f"Fetching full text for up to 15 of {n_articles} articles…")
+            all_items = enrich_with_full_text(all_items, max_articles=15)
 
-        status.update(label=f"Crawl complete — {len(articles)} articles ready.", state="complete")
+        status.update(
+            label=f"Done — {len(all_items)} items ready for Claude.",
+            state="complete",
+        )
 
     # Stats row
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Articles", len(articles))
-    with col2:
-        sources = {a.source for a in articles}
-        st.metric("Sources", len(sources))
-    with col3:
-        cats = {a.category for a in articles}
-        st.metric("Categories", len(cats))
+    n_articles = sum(1 for a in all_items if a.item_type == "article")
+    n_posts = sum(1 for a in all_items if a.item_type == "post")
+    sources = {a.source for a in all_items}
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Items", len(all_items))
+    col2.metric("Articles", n_articles)
+    col3.metric("Social Posts", n_posts)
+    col4.metric("Sources", len(sources))
 
     st.markdown("---")
 
-    # Step 2: Generate report via Claude (streaming)
+    # Stream the report
     st.markdown("### Generating report with Claude…")
     report_placeholder = st.empty()
 
     report_text = ""
     try:
         for chunk in generate_report(
-            articles=articles,
+            articles=all_items,
             topics=topics,
             report_date=today,
             api_key=api_key_input,
@@ -213,12 +317,10 @@ if generate_btn:
         st.error(f"Report generation failed: {e}")
         st.stop()
 
-    # Store in session so it survives reruns
     st.session_state["report"] = report_text
     st.session_state["report_date"] = today.isoformat()
-    st.session_state["article_count"] = len(articles)
+    st.session_state["item_count"] = len(all_items)
 
-    # Download button
     st.markdown("---")
     st.download_button(
         label="Download Report (.md)",
@@ -227,17 +329,20 @@ if generate_btn:
         mime="text/markdown",
     )
 
-    # Article list (collapsed)
-    with st.expander(f"View all {len(articles)} crawled articles"):
-        for a in articles:
+    with st.expander(f"View all {len(all_items)} crawled items"):
+        for a in sorted(all_items, key=lambda x: x.category):
             pub = a.published.strftime("%Y-%m-%d %H:%M") if a.published else "—"
-            st.markdown(f"- **[{a.title}]({a.url})** — {a.source} · {a.category} · {pub}")
+            icon = "💬" if a.item_type == "post" else "📄"
+            author = f" · {a.author}" if a.author else ""
+            st.markdown(
+                f"{icon} **[{a.title}]({a.url})** — "
+                f"{a.source}{author} · {a.category} · {pub}"
+            )
 
 elif "report" in st.session_state:
-    # Show last generated report
     st.info(
         f"Showing report from {st.session_state['report_date']} "
-        f"({st.session_state['article_count']} articles). "
+        f"({st.session_state['item_count']} items). "
         "Click **Generate Morning Report** to refresh.",
         icon="ℹ️",
     )
@@ -253,27 +358,38 @@ elif "report" in st.session_state:
         mime="text/markdown",
     )
 else:
-    # Landing state
     st.markdown(
         """
         ### How it works
 
-        1. **Select categories** in the sidebar (General, Finance, Tech, etc.)
-        2. Optionally enter **topic keywords** to focus the report (e.g. `AI, Fed, earnings`)
-        3. Click **Generate Morning Report**
+        1. **Select news categories** (General, Finance, Tech, Politics…)
+        2. Optionally enable **X.com** (requires Twitter API v2 Bearer Token)
+        3. Optionally enable **Truth Social** (no API key needed)
+        4. Enter **topic keywords** to focus the report *(optional)*
+        5. Click **Generate Morning Report**
 
-        Claude will crawl the latest RSS feeds, filter the articles, and write
-        a structured briefing covering:
+        Claude reads all the content and writes a structured briefing covering:
         - Executive summary
         - Key stories
         - Themes & trends
-        - Market signals
+        - Market & economic signals
+        - Social media pulse *(if social sources are enabled)*
         - What to watch today
 
         ---
 
-        **Available sources:**
+        **RSS Sources available:**
         """
     )
-    for cat, sources in NEWS_SOURCES.items():
-        st.markdown(f"**{cat}:** " + " · ".join(s["name"] for s in sources))
+    for cat, srcs in NEWS_SOURCES.items():
+        names = " · ".join(s["name"] for s in srcs)
+        st.markdown(f"**{cat}:** {names}")
+
+    st.markdown(
+        """
+        ---
+        **Social Media Sources:**
+        - **X.com** — Real-time posts via Twitter API v2 search (Bearer Token required)
+        - **Truth Social** — Public posts via open Mastodon-compatible API (no key needed)
+        """
+    )
