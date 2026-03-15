@@ -116,7 +116,7 @@ with st.sidebar:
     # ── RSS News Categories ───────────────────────────────────────────────────
     st.markdown("**News Categories** *(RSS)*")
     selected_categories: list[str] = []
-    default_cats = {"General", "Business & Finance", "Technology"}
+    default_cats = {"Business & Finance", "Technology"}
     for cat in ALL_CATEGORIES:
         if st.checkbox(cat, value=(cat in default_cats), key=f"cat_{cat}"):
             selected_categories.append(cat)
@@ -138,7 +138,7 @@ with st.sidebar:
         st.caption("Twitter API v2 Bearer Token from developer.twitter.com")
         x_queries_raw = st.text_area(
             "X search queries",
-            placeholder="e.g. Fed interest rates\nAI earnings\ntech layoffs",
+            value="AI financial services\nLLM banking fintech\nFed interest rates\nAI earnings Wall Street",
             height=90,
             help="One search query per line. Each is fetched separately.",
             label_visibility="collapsed",
@@ -158,7 +158,7 @@ with st.sidebar:
     if use_truth:
         truth_queries_raw = st.text_area(
             "Truth Social search terms",
-            placeholder="e.g. economy\nelection\ntariffs",
+            value="economy\nAI\nbanks\nfintech\nFed",
             height=90,
             help="One search term per line. No API key required.",
             label_visibility="collapsed",
@@ -182,7 +182,7 @@ with st.sidebar:
     st.caption("Comma-separated keywords applied across ALL sources. Leave blank for all content.")
     topics_input = st.text_area(
         "Topics",
-        placeholder="e.g. AI, interest rates, climate, earnings",
+        value="AI, artificial intelligence, financial services, fintech, banking, Fed, interest rates, earnings, markets, LLM, machine learning",
         height=80,
         label_visibility="collapsed",
     )
